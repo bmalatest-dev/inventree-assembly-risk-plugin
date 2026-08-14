@@ -1,54 +1,141 @@
-/* Lightweight UI renderer. Heavy calculations are performed in Python and
- * supplied in featureContext, so the panel does not issue extra API requests.
+/* InvenTree Assembly Risk UI.
+ *
+ * All inventory calculations are performed server-side. This file only renders
+ * the context supplied by UserInterfaceMixin features.
  */
-export function renderPanel({ context }) {
-  const React = globalThis.React;
+
+function resolveFeatureContext(props) {
+  // InvenTree has used both direct ``context`` and nested feature payloads in
+  // UI plugin renderers. Accept either shape to keep this plugin tolerant of
+  // minor frontend-version differences.
+  if (!props) return {};
+  if (props.context && props.context.rows !== undefined) return props.context;
+  if (props.featureContext) return props.featureContext;
+  if (props.feature && props.feature.context) return props.feature.context;
+  if (props.item && props.item.context) return props.item.context;
+  return props.context || props;
+}
+
+function getReact() {
+  return globalThis.React;
+}
+
+function severityColor(severity) {
+  if (severity === 'critical') return 'var(--mantine-color-red-7, #c92a2a)';
+  if (severity === 'warning') return 'var(--mantine-color-orange-7, #d9480f)';
+  return 'var(--mantine-color-green-7, #2b8a3e)';
+}
+
+function riskBadge(h, row) {
+  return h(
+    'span',
+    {
+      style: {
+        display: 'inline-block',
+        color: severityColor(row.severity),
+        border: '1px solid currentColor',
+        borderRadius: '999px',
+        padding: '2px 8px',
+        fontWeight: 600,
+        whiteSpace: 'nowrap',
+      },
+    },
+    row.risk
+  );
+}
+
+function renderError(h, text) {
+  if (!text) return null;
+  return h(
+    'div',
+    {
+      style: {
+        margin: '8px',
+        padding: '10px 12px',
+        border: '1px solid var(--mantine-color-red-6, #e03131)',
+        borderRadius: '6px',
+        color: 'var(--mantine-color-red-7, #c92a2a)',
+        whiteSpace: 'pre-wrap',
+      },
+    },
+    text
+  );
+}
+
+function renderEmpty(h, mode) {
+  return h(
+    'div',
+    { style: { padding: '12px' } },
+    mode === 'global'
+      ? 'No assembly-risk conditions are currently flagged across active Build Orders.'
+      : 'No assembly-risk conditions are currently flagged for this Build Order.'
+  );
+}
+
+function renderTable(props, mode) {
+  const React = getReact();
+  if (!React) {
+    return 'Assembly Risk UI could not access the InvenTree React runtime.';
+  }
   const h = React.createElement;
-  const rows = (context && context.rows) || [];
+  const context = resolveFeatureContext(props);
+  const rows = Array.isArray(context.rows) ? context.rows : [];
+  const error = context.error || '';
+
+  const cell = {
+    padding: '8px 10px',
+    borderBottom: '1px solid var(--mantine-color-default-border, #ddd)',
+    verticalAlign: 'top',
+  };
+  const head = { ...cell, fontWeight: 700, textAlign: 'left', whiteSpace: 'nowrap' };
 
   if (!rows.length) {
-    return h('div', { style: { padding: '12px' } },
-      'No assembly-risk conditions are currently flagged for this Build Order.'
-    );
+    return h('div', null, renderError(h, error), renderEmpty(h, mode));
   }
 
-  const badgeStyle = (severity) => ({
-    display: 'inline-block',
-    border: '1px solid currentColor',
-    borderRadius: '999px',
-    padding: '2px 8px',
-    fontWeight: 600,
-    whiteSpace: 'nowrap',
-    opacity: severity === 'ok' ? 0.75 : 1,
-  });
+  const headers = mode === 'global'
+    ? ['Part', 'Open BO Demand', 'Physical Buffer', 'Planned Spillage', 'On Order', 'Affected BOs', 'Assembly Risk', 'Guidance']
+    : ['Part', 'Required This BO', 'Physical Buffer', 'Planned Spillage', 'On Order', 'Affected BOs', 'Assembly Risk', 'Guidance'];
 
-  const cell = { padding: '8px 10px', borderBottom: '1px solid var(--mantine-color-default-border, #ddd)', verticalAlign: 'top' };
-  const head = { ...cell, fontWeight: 700, textAlign: 'left' };
-
-  return h('div', { style: { overflowX: 'auto', padding: '4px' } },
-    h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' } },
-      h('thead', null,
-        h('tr', null,
-          h('th', { style: head }, 'Part'),
-          h('th', { style: head }, 'Required'),
-          h('th', { style: head }, 'Physical Buffer'),
-          h('th', { style: head }, 'Planned Spillage'),
-          h('th', { style: head }, 'On Order'),
-          h('th', { style: head }, 'Assembly Risk'),
-          h('th', { style: head }, 'Guidance')
+  return h(
+    'div',
+    { style: { overflowX: 'auto', padding: '4px' } },
+    renderError(h, error),
+    h(
+      'table',
+      { style: { width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' } },
+      h('thead', null, h('tr', null, ...headers.map((x) => h('th', { key: x, style: head }, x)))),
+      h(
+        'tbody',
+        null,
+        ...rows.map((row) =>
+          h(
+            'tr',
+            { key: `${mode}-${row.part_id}-${row.part}` },
+            h(
+              'td',
+              { style: cell },
+              h('div', { style: { fontWeight: 600 } }, row.part),
+              h('div', { style: { opacity: 0.7, fontSize: '0.82em' } }, row.description || '')
+            ),
+            h('td', { style: cell }, mode === 'global' ? row.open_demand : row.required_this_build),
+            h('td', { style: cell }, row.physical_buffer),
+            h('td', { style: cell }, row.planned_spillage),
+            h('td', { style: cell }, row.on_order),
+            h('td', { style: cell }, row.affected_builds || ''),
+            h('td', { style: cell }, riskBadge(h, row)),
+            h('td', { style: cell, minWidth: '260px' }, row.message || '')
+          )
         )
-      ),
-      h('tbody', null,
-        ...rows.map((row) => h('tr', { key: `${row.part_id}-${row.part}` },
-          h('td', { style: cell }, h('div', { style: { fontWeight: 600 } }, row.part), h('div', { style: { opacity: 0.75 } }, row.description || '')),
-          h('td', { style: cell }, row.required_this_build),
-          h('td', { style: cell }, row.physical_buffer),
-          h('td', { style: cell }, row.planned_spillage),
-          h('td', { style: cell }, row.on_order),
-          h('td', { style: cell }, h('span', { style: badgeStyle(row.severity) }, row.risk)),
-          h('td', { style: cell }, row.message)
-        ))
       )
     )
   );
+}
+
+export function renderPanel(props) {
+  return renderTable(props, 'build');
+}
+
+export function renderDashboardItem(props) {
+  return renderTable(props, 'global');
 }
