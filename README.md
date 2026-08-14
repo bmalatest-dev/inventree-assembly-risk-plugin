@@ -1,8 +1,8 @@
 # InvenTree Assembly Risk Plugin
 
-Read-only InvenTree plugin which flags components where active Build Orders can consume nearly all usable physical stock, leaving little or no contingency for normal assembly loss.
+Read-only InvenTree plugin which flags components where Production Build Orders can consume nearly all usable physical stock, leaving little or no contingency for normal assembly loss.
 
-## v0.3.0 risk-display behavior
+## v0.4.0 risk-display behavior
 
 By default, Assembly Risk now reports only the condition the production team needs to act on: **planned spillage is greater than zero, but no physical buffer remains after all active Build Order demand is satisfied**. Depending on whether the BOM itself is covered, this is shown as either **CRITICAL - UNFILLED** or **Exact BOM quantity**. Positive-buffer states such as Critical Low, Low, Limited, or Normal are hidden by default. They can be restored with the `SHOW_ALL_RISK_LEVELS` plugin setting.
 
@@ -13,13 +13,13 @@ StockItems with no assigned stock location are now treated as valid physical sto
 This release provides both requested views:
 
 - **Build Order level** — an **Assembly Risk** panel on individual Build Order pages.
-- **Global** — an **Assembly Risk - All Open Build Orders** dashboard widget showing risk across all active Build Orders.
+- **Global** — an **Assembly Risk - All Open Build Orders** dashboard widget showing risk across all Production Build Orders.
 
 The global widget can be added from the InvenTree dashboard using **Add Widget**.
 
 ## Calculation behavior
 
-- Reads **all active Build Orders** and their unfinished output quantities.
+- Reads **all Production Build Orders** and their unfinished output quantities.
 - Uses **physical StockItems only** for physical assembly risk.
 - `On Order` is shown separately and **never** makes current physical risk look safe.
 - Excludes blank/null locations, any location containing **Rework**, and the verification / shipping / storage exclusions used by the existing BO consolidator script.
@@ -67,3 +67,14 @@ Assembly Risk remains intentionally separate from the future Procurement Buy Rep
 - **Build Order panel:** shows every required part for that Build Order, including Exact BOM Quantity, Critical Low Buffer, Low Buffer, Limited Buffer, and Normal Spillage states.
 - **Global dashboard widget:** acts as an exception report and only shows parts where spillage would normally be required but **no physical buffer remains** after all active Build Order demand is satisfied. This includes true shortages and exact-BOM-quantity cases.
 
+
+
+## v0.4.0 performance changes
+
+- Assembly Risk demand is limited to Build Orders whose status is **Production**.
+- Physical StockItems are only loaded for parts relevant to current Production demand.
+- Usable stock is aggregated by part before the simulation instead of repeatedly scanning individual StockItems.
+- BOM/component metadata is memoized during each calculation.
+- Stock-location exclusion checks are cached per location.
+- A short calculation cache (30 seconds by default) lets the dashboard and BO panel reuse the same production snapshot.
+- Non-Production BOs still show the Assembly Risk panel, but with a note that they are excluded from the calculation.

@@ -67,7 +67,7 @@ function renderEmpty(h, mode) {
     'div',
     { style: { padding: '12px' } },
     mode === 'global'
-      ? 'No assembly-risk conditions are currently flagged across active Build Orders.'
+      ? 'No zero-buffer assembly-risk conditions are currently flagged across Production Build Orders.'
       : 'No assembly-risk conditions are currently flagged for this Build Order.'
   );
 }
@@ -81,6 +81,7 @@ function renderTable(props, mode) {
   const context = resolveFeatureContext(props);
   const rows = Array.isArray(context.rows) ? context.rows : [];
   const error = context.error || '';
+  const notice = context.notice || '';
 
   const cell = {
     padding: '8px 10px',
@@ -90,7 +91,10 @@ function renderTable(props, mode) {
   const head = { ...cell, fontWeight: 700, textAlign: 'left', whiteSpace: 'nowrap' };
 
   if (!rows.length) {
-    return h('div', null, renderError(h, error), renderEmpty(h, mode));
+    const noticeNode = notice
+      ? h('div', { style: { padding: '12px', opacity: 0.8 } }, notice)
+      : renderEmpty(h, mode);
+    return h('div', null, renderError(h, error), noticeNode);
   }
 
   const headers = mode === 'global'
