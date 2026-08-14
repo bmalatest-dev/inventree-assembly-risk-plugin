@@ -2,6 +2,12 @@
 
 Read-only InvenTree plugin which flags components where active Build Orders can consume nearly all usable physical stock, leaving little or no contingency for normal assembly loss.
 
+## v0.3.0 risk-display behavior
+
+By default, Assembly Risk now reports only the condition the production team needs to act on: **planned spillage is greater than zero, but no physical buffer remains after all active Build Order demand is satisfied**. Depending on whether the BOM itself is covered, this is shown as either **CRITICAL - UNFILLED** or **Exact BOM quantity**. Positive-buffer states such as Critical Low, Low, Limited, or Normal are hidden by default. They can be restored with the `SHOW_ALL_RISK_LEVELS` plugin setting.
+
+StockItems with no assigned stock location are now treated as valid physical stock. Explicitly excluded locations (including any location or ancestor containing `Rework`) remain excluded. On Order remains display-only and is never counted as physical assembly buffer.
+
 ## v0.2.0
 
 This release provides both requested views:
@@ -55,3 +61,9 @@ Ensure the InvenTree global **Enable Interface Plugins** setting is enabled.
 ## Scope
 
 Assembly Risk remains intentionally separate from the future Procurement Buy Report. Shared calculation helpers live in `engine.py` so procurement logic can later reuse the same stock-location, spillage and risk rules.
+
+## Display behavior
+
+- **Build Order panel:** shows every required part for that Build Order, including Exact BOM Quantity, Critical Low Buffer, Low Buffer, Limited Buffer, and Normal Spillage states.
+- **Global dashboard widget:** acts as an exception report and only shows parts where spillage would normally be required but **no physical buffer remains** after all active Build Order demand is satisfied. This includes true shortages and exact-BOM-quantity cases.
+

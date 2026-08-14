@@ -24,7 +24,6 @@ DEFAULT_EXCLUDED_LOCATION_NAMES = {
     "not verified assembly room",
     "not verified component room",
     "not verified rework area",
-    "null location",
     "rework area",
     "rework room- eval boards",
     "shipping room",
@@ -142,8 +141,12 @@ def location_is_excluded(path_parts: Iterable[str], extra_names: Iterable[str] =
     """Return True for the same excluded stock-location semantics as the script."""
     names = DEFAULT_EXCLUDED_LOCATION_NAMES | {str(x).strip().lower() for x in extra_names if str(x).strip()}
     values = [str(x or "").strip() for x in path_parts]
+    # A StockItem with no location is still physical stock. The original CSV
+    # workflow excluded blank locations because location hygiene was uncertain,
+    # but inside InvenTree itself the StockItem record is authoritative. Only
+    # explicitly excluded locations (including any Rework ancestor) are ignored.
     if not any(values):
-        return True
+        return False
     for value in values:
         norm = value.lower()
         if not norm:

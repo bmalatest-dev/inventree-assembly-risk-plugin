@@ -26,3 +26,9 @@ def test_rework_descendant_excluded():
 
 def test_good_location_allowed():
     assert not location_is_excluded(["Main", "Component Room", "Shelf A"])
+
+
+def test_unlocated_stock_allowed():
+    # A StockItem without a location is still physical stock inside InvenTree.
+    assert not location_is_excluded([])
+    assert not location_is_excluded([""])

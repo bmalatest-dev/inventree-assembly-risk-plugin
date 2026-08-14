@@ -26,7 +26,7 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
     SLUG = "assembly-risk"
     TITLE = "Assembly Risk"
     DESCRIPTION = "Flags components with little or no physical stock buffer across open Build Orders."
-    VERSION = "0.2.0"
+    VERSION = "0.3.0"
     AUTHOR = "Per Vices Corporation"
     WEBSITE = "https://github.com/bmalatest-dev/inventree-assembly-risk-plugin"
 
@@ -38,22 +38,6 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
                 "verification / shipping / storage exclusions."
             ),
             "default": "",
-        },
-        "SHOW_NORMAL": {
-            "name": _("Show normal-risk rows on Build Orders"),
-            "description": _(
-                "Show components with more than 20 units of physical buffer on individual Build Orders."
-            ),
-            "default": False,
-            "validator": bool,
-        },
-        "SHOW_NORMAL_GLOBAL": {
-            "name": _("Show normal-risk rows globally"),
-            "description": _(
-                "Show normal / adequately buffered parts in the global Assembly Risk dashboard widget."
-            ),
-            "default": False,
-            "validator": bool,
         },
     }
 
@@ -289,14 +273,30 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
         rows.sort(key=lambda r: (rank.get(r["severity"], 9), r.get("part", "")))
         return rows
 
+    @staticmethod
+    def _should_show_global_requirement(req):
+        """Return True for actionable zero-buffer conditions on the global widget.
+
+        The global dashboard is intentionally an exception report. It only shows
+        a part when the normal spillage model expects a positive contingency
+        quantity but there is no physical buffer left after all active Build Order
+        demand is satisfied. This includes both a true shortage (CRITICAL -
+        UNFILLED) and an exactly-covered BOM (Exact BOM quantity).
+
+        Positive-buffer states such as Critical Low Buffer, Low Buffer, Limited
+        Buffer and Normal Spillage are deliberately omitted from the dashboard.
+        They remain visible on the individual Build Order panel.
+        """
+        spillage = dec(req.get("spillage", 0))
+        physical_buffer = dec(req.get("physical_buffer", 0))
+        return spillage > 0 and physical_buffer <= 0
+
     def _rows_for_build(self, build_id):
         rows = []
         for req in self._calculate():
             if req["build_id"] != build_id:
                 continue
             risk = req["risk"]
-            if risk.severity == "ok" and not self.get_setting("SHOW_NORMAL"):
-                continue
 
             message = risk.message
             other_builds = [x for x in req["builds"] if x != req["build_ref"]]
@@ -353,7 +353,12 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
                 spillage=row["planned_spillage"],
                 shortage=row["shortage"],
             )
-            if risk.severity == "ok" and not self.get_setting("SHOW_NORMAL_GLOBAL"):
+            visibility_probe = {
+                "spillage": row["planned_spillage"],
+                "physical_buffer": row["physical_buffer"],
+                "shortage": row["shortage"],
+            }
+            if not self._should_show_global_requirement(visibility_probe):
                 continue
             rows.append(
                 {
