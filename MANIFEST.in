@@ -1,0 +1,2 @@
+recursive-include inventree_assembly_risk/static *.js
+include README.md
