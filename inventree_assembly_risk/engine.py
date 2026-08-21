@@ -86,54 +86,50 @@ class RiskResult:
     message: str
 
 
-def classify_risk(*, physical_buffer, spillage, shortage=0) -> RiskResult:
-    """Classify a BO/part condition using the existing script thresholds."""
+def classify_risk(*, physical_buffer, spillage=0, shortage=0) -> RiskResult:
+    """Classify the final buffer after BOM demand and planned overage are applied.
+
+    ``spillage`` remains an accepted argument for backwards compatibility and
+    display context, but it is not subtracted again here. The Production Demand
+    Snapshot already includes planned spillage / overage in outstanding demand.
+    """
     physical_buffer = max(dec(physical_buffer), Decimal("0"))
-    spillage = max(dec(spillage), Decimal("0"))
     shortage = max(dec(shortage), Decimal("0"))
 
     if shortage > 0:
         return RiskResult(
             "critical",
             "CRITICAL - UNFILLED",
-            f"{fmt(shortage)} required across open builds is not covered by usable physical stock.",
+            f"{fmt(shortage)} of Production demand (including planned overage) is not covered by usable physical stock.",
         )
-
-    beyond = physical_buffer - spillage
     if physical_buffer <= 0:
         return RiskResult(
             "critical",
-            "Exact BOM quantity",
-            "No physical buffer remains; minimize setup loss and return all unused parts.",
+            "Exact planned quantity",
+            "No physical buffer remains after all Production demand and planned overage; minimize setup loss and return all unused parts.",
         )
-    if physical_buffer < spillage:
+    if physical_buffer <= 2:
         return RiskResult(
             "critical",
             "Critical low buffer",
-            f"{fmt(physical_buffer)} extra available versus {fmt(spillage)} planned spillage; minimize setup loss.",
-        )
-    if beyond <= 0:
-        return RiskResult(
-            "warning",
-            "Low buffer",
-            f"{fmt(physical_buffer)} extra available, exactly meeting planned spillage of {fmt(spillage)}.",
+            f"Only {fmt(physical_buffer)} extra remain after all Production demand and planned overage.",
         )
     if physical_buffer <= 5:
         return RiskResult(
             "warning",
             "Low buffer",
-            f"{fmt(physical_buffer)} extra available; {fmt(beyond)} remain beyond planned spillage.",
+            f"Only {fmt(physical_buffer)} extra remain after all Production demand and planned overage.",
         )
     if physical_buffer <= 20:
         return RiskResult(
             "warning",
             "Limited buffer",
-            f"{fmt(physical_buffer)} extra available; {fmt(beyond)} remain beyond planned spillage.",
+            f"{fmt(physical_buffer)} extra remain after all Production demand and planned overage.",
         )
     return RiskResult(
         "ok",
         "Normal spillage allowed",
-        f"{fmt(physical_buffer)} extra available; {fmt(beyond)} remain beyond planned spillage.",
+        f"{fmt(physical_buffer)} extra remain after all Production demand and planned overage.",
     )
 
 

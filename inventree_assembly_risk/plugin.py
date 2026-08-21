@@ -15,7 +15,7 @@ from django.utils.translation import gettext_lazy as _
 from plugin import InvenTreePlugin
 from plugin.mixins import SettingsMixin, UserInterfaceMixin
 
-from build.models import Build
+from build.models import Build, BuildLine
 from build.status_codes import BuildStatus
 from stock.models import StockItem
 
@@ -27,7 +27,7 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
     SLUG = "assembly-risk"
     TITLE = "Assembly Risk"
     DESCRIPTION = "Flags components with little or no physical stock buffer across Production Build Orders."
-    VERSION = "0.4.0"
+    VERSION = "0.5.0"
     AUTHOR = "Per Vices Corporation"
     WEBSITE = "https://github.com/bmalatest-dev/inventree-assembly-risk-plugin"
 
@@ -93,12 +93,13 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
         except Exception:
             return [str(getattr(location, "name", ""))]
 
-    def _usable_stock_by_part(self, relevant_part_ids):
-        """Return usable physical stock aggregated by part ID.
+    def _usable_stock_items(self, relevant_part_ids):
+        """Return usable physical StockItems with truly free quantities.
 
-        Only StockItems for parts which can satisfy current Production BO demand
-        are inspected. Location exclusion is cached per location, avoiding an
-        ancestor lookup for every StockItem in large production databases.
+        The free balance is the StockItem quantity minus *all* active InvenTree
+        allocations (Build, Sales Order and Transfer Order). Existing allocations
+        therefore remain reserved and can never be virtually consumed by another
+        Production Build Order.
         """
         relevant_part_ids = {int(x) for x in relevant_part_ids if x is not None}
         if not relevant_part_ids:
@@ -109,12 +110,33 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
             .select_related("location")
             .only("id", "part_id", "quantity", "location_id", "location__name")
         )
+        items = list(qs.iterator(chunk_size=2000))
+        if not items:
+            return {}
+
+        # Newer InvenTree releases provide a bulk helper which resolves Build,
+        # Sales Order and Transfer Order allocations in three aggregate queries.
+        # Keep a compatibility fallback for older installations.
+        try:
+            allocated_by_item = StockItem.bulk_allocation_count(items)
+        except Exception:
+            allocated_by_item = {}
+            for item in items:
+                try:
+                    allocated_by_item[item.pk] = dec(item.allocation_count())
+                except Exception:
+                    try:
+                        allocated_by_item[item.pk] = max(
+                            dec(item.quantity) - dec(item.unallocated_quantity()),
+                            Decimal("0"),
+                        )
+                    except Exception:
+                        allocated_by_item[item.pk] = Decimal("0")
 
         extra = self._extra_excluded_locations()
         location_excluded = {}
-        quantities = defaultdict(Decimal)
-
-        for item in qs.iterator(chunk_size=2000):
+        usable = {}
+        for item in items:
             location_id = item.location_id
             if location_id not in location_excluded:
                 location_excluded[location_id] = location_is_excluded(
@@ -123,11 +145,18 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
             if location_excluded[location_id]:
                 continue
 
-            qty = dec(item.quantity)
-            if qty > 0:
-                quantities[item.part_id] += qty
-
-        return dict(quantities)
+            quantity = max(dec(item.quantity), Decimal("0"))
+            allocated = max(dec(allocated_by_item.get(item.pk, 0)), Decimal("0"))
+            free = max(quantity - allocated, Decimal("0"))
+            usable[item.pk] = {
+                "stock_item_id": item.pk,
+                "part_id": item.part_id,
+                "quantity": quantity,
+                "allocated": allocated,
+                "free": free,
+                "final_free": free,
+            }
+        return usable
 
     @staticmethod
     def _candidate_part_ids(part, allow_variants: bool):
@@ -221,137 +250,167 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
         return max(total - completed, Decimal("0"))
 
     def _production_requirements(self):
-        """Build component demand for Build Orders whose status is Production.
+        """Build allocation-aware demand for all Production Build Orders.
 
-        BOM metadata is calculated once per assembly part, then reused by all
-        Production Build Orders for that assembly. Per-component variant,
-        spillage, pricing and parameter lookups are also memoized for this run.
+        Demand is sourced from BuildLine rather than reconstructed from the BOM:
+
+            BOM remaining = BuildLine.quantity - BuildLine.consumed
+            outstanding   = BOM remaining + planned spillage - existing allocations
+
+        BuildItem allocations are retained with their exact StockItem IDs. This
+        both credits the BO which owns the allocation and lets downstream users
+        (notably Packing List) ask for risk for a specific BO / StockItem pair.
         """
         production_status = self._production_status_value()
-        builds = list(
-            Build.objects.filter(status=production_status)
-            .select_related("part")
-            .order_by("priority", "reference")
+        lines = (
+            BuildLine.objects.filter(build__status=production_status)
+            .select_related(
+                "build",
+                "bom_item",
+                "bom_item__sub_part",
+                "bom_item__sub_part__category",
+            )
+            .prefetch_related("allocations__stock_item")
+            .order_by("build__priority", "build__reference", "pk")
         )
 
         requirements = []
-        bom_cache = {}
         component_meta = {}
-
-        for build in builds:
-            remaining_build_qty = self._remaining_build_quantity(build)
-            if remaining_build_qty <= 0 or build.part_id is None:
+        for line in lines:
+            build = line.build
+            bom = line.bom_item
+            part = getattr(bom, "sub_part", None)
+            if part is None:
                 continue
 
-            if build.part_id not in bom_cache:
-                try:
-                    bom_items = list(
-                        build.part.get_bom_items().select_related(
-                            "sub_part", "sub_part__category"
-                        )
-                    )
-                except Exception:
-                    bom_items = list(build.part.get_bom_items())
+            bom_remaining = max(
+                dec(getattr(line, "quantity", 0)) - dec(getattr(line, "consumed", 0)),
+                Decimal("0"),
+            )
+            if bom_remaining <= 0:
+                continue
 
-                templates = []
-                for bom in bom_items:
-                    part = bom.sub_part
-                    if part is None:
-                        continue
-                    bom_qty = dec(getattr(bom, "quantity", 0))
-                    if bom_qty <= 0:
-                        continue
+            allow_variants = bool(getattr(bom, "allow_variants", False))
+            meta_key = (part.pk, allow_variants)
+            if meta_key not in component_meta:
+                spillage, rule = spillage_for_part(
+                    self._part_footprint(part),
+                    self._pricing_max(part),
+                    self._part_category(part),
+                )
+                component_meta[meta_key] = {
+                    "part_id": part.pk,
+                    "part_name": getattr(part, "IPN", None) or part.name,
+                    "part_full_name": getattr(part, "full_name", str(part)),
+                    "allow_variants": allow_variants,
+                    "candidate_ids": self._candidate_part_ids(part, allow_variants),
+                    "spillage": spillage,
+                    "spillage_rule": rule,
+                    "on_order": self._on_order_qty(part),
+                }
+            meta = component_meta[meta_key]
 
-                    allow_variants = bool(getattr(bom, "allow_variants", False))
-                    meta_key = (part.pk, allow_variants)
-                    if meta_key not in component_meta:
-                        spillage, rule = spillage_for_part(
-                            self._part_footprint(part),
-                            self._pricing_max(part),
-                            self._part_category(part),
-                        )
-                        component_meta[meta_key] = {
-                            "part": part,
-                            "part_id": part.pk,
-                            "part_name": getattr(part, "IPN", None) or part.name,
-                            "part_full_name": getattr(part, "full_name", str(part)),
-                            "allow_variants": allow_variants,
-                            "candidate_ids": self._candidate_part_ids(part, allow_variants),
-                            "spillage": spillage,
-                            "spillage_rule": rule,
-                            "on_order": self._on_order_qty(part),
-                        }
-                    templates.append((bom_qty, component_meta[meta_key]))
-                bom_cache[build.part_id] = templates
-
-            for bom_qty, meta in bom_cache[build.part_id]:
-                required = bom_qty * remaining_build_qty
-                if required <= 0:
+            allocation_details = []
+            allocated = Decimal("0")
+            for allocation in line.allocations.all():
+                qty = max(dec(getattr(allocation, "quantity", 0)), Decimal("0"))
+                if qty <= 0:
                     continue
-                requirements.append(
+                allocated += qty
+                stock_item = getattr(allocation, "stock_item", None)
+                allocation_details.append(
                     {
-                        "build_id": build.pk,
-                        "build_ref": str(build.reference),
-                        "priority": int(getattr(build, "priority", 0) or 0),
-                        "part_id": meta["part_id"],
-                        "part_name": meta["part_name"],
-                        "part_full_name": meta["part_full_name"],
-                        "allow_variants": meta["allow_variants"],
-                        "candidate_ids": set(meta["candidate_ids"]),
-                        "required": required,
-                        "spillage": meta["spillage"],
-                        "spillage_rule": meta["spillage_rule"],
-                        "on_order": meta["on_order"],
+                        "allocation_id": allocation.pk,
+                        "stock_item_id": getattr(allocation, "stock_item_id", None),
+                        "stock_part_id": getattr(stock_item, "part_id", None),
+                        "quantity": qty,
                     }
                 )
+
+            gross_requirement = bom_remaining + meta["spillage"]
+            outstanding = max(gross_requirement - allocated, Decimal("0"))
+
+            requirements.append(
+                {
+                    "build_id": build.pk,
+                    "build_ref": str(build.reference),
+                    "priority": int(getattr(build, "priority", 0) or 0),
+                    "build_line_id": line.pk,
+                    "part_id": meta["part_id"],
+                    "part_name": meta["part_name"],
+                    "part_full_name": meta["part_full_name"],
+                    "allow_variants": meta["allow_variants"],
+                    "candidate_ids": set(meta["candidate_ids"]),
+                    "bom_remaining": bom_remaining,
+                    "allocated": allocated,
+                    "required": outstanding,
+                    "gross_requirement": gross_requirement,
+                    "spillage": meta["spillage"],
+                    "spillage_rule": meta["spillage_rule"],
+                    "on_order": meta["on_order"],
+                    "existing_allocations": allocation_details,
+                    "virtual_allocations": [],
+                }
+            )
         return requirements
 
     @staticmethod
-    def _allocate_aggregated_stock(requirements, stock_by_part):
-        """Simulate Production BO demand against quantity aggregated by part.
+    def _allocate_free_stock_items(requirements, stock_items):
+        """Virtually satisfy outstanding Production demand from free StockItems.
 
-        This intentionally does not choose physical StockItem IDs. Assembly Risk
-        only needs to know whether sufficient physical quantity exists and what
-        buffer remains; StockItem-specific allocation remains InvenTree's job.
+        Existing allocations have already been removed from each StockItem's free
+        quantity and from the owning BO's outstanding requirement. The simulation
+        is read-only and records which free StockItems would satisfy each remaining
+        requirement so the snapshot can later answer BO / StockItem risk queries.
         """
-        remaining_stock = defaultdict(Decimal)
-        remaining_stock.update({pid: dec(qty) for pid, qty in stock_by_part.items()})
-
+        remaining = {
+            stock_id: dec(data.get("free", 0)) for stock_id, data in stock_items.items()
+        }
         ordered = sorted(
             requirements,
             key=lambda r: (r["priority"], -r["required"], r["build_ref"], r["part_id"]),
         )
         for req in ordered:
-            need = req["required"]
-            candidate_parts = [
-                pid for pid in req["candidate_ids"] if remaining_stock.get(pid, Decimal("0")) > 0
+            need = max(dec(req.get("required", 0)), Decimal("0"))
+            candidates = [
+                stock_id
+                for stock_id, data in stock_items.items()
+                if data.get("part_id") in req["candidate_ids"]
+                and remaining.get(stock_id, Decimal("0")) > 0
             ]
-            # Consume the largest available compatible source first. This keeps
-            # the number of touched part pools small and mirrors the previous
-            # largest-source-first simulation without scanning StockItems.
-            candidate_parts.sort(
-                key=lambda pid: (-remaining_stock.get(pid, Decimal("0")), pid)
+            candidates.sort(
+                key=lambda stock_id: (
+                    -remaining.get(stock_id, Decimal("0")),
+                    stock_id,
+                )
             )
-            for pid in candidate_parts:
+            virtual = []
+            for stock_id in candidates:
                 if need <= 0:
                     break
-                available = remaining_stock.get(pid, Decimal("0"))
+                available = remaining.get(stock_id, Decimal("0"))
                 take = min(need, available)
-                remaining_stock[pid] = available - take
+                if take <= 0:
+                    continue
+                remaining[stock_id] = available - take
                 need -= take
+                virtual.append({"stock_item_id": stock_id, "quantity": take})
+            req["virtual_allocations"] = virtual
             req["unfilled"] = max(need, Decimal("0"))
 
-        return remaining_stock
+        for stock_id, data in stock_items.items():
+            data["final_free"] = remaining.get(stock_id, Decimal("0"))
+        return remaining
 
     def _calculate_uncached(self):
-        """Run the optimized read-only Production stock allocation simulation."""
+        """Run the allocation-aware Production Demand Snapshot."""
         requirements = self._production_requirements()
         relevant_part_ids = set()
         for req in requirements:
             relevant_part_ids.update(req["candidate_ids"])
 
-        stock_by_part = self._usable_stock_by_part(relevant_part_ids)
-        remaining_stock = self._allocate_aggregated_stock(requirements, stock_by_part)
+        stock_items = self._usable_stock_items(relevant_part_ids)
+        self._allocate_free_stock_items(requirements, stock_items)
 
         shortage_by_part = defaultdict(Decimal)
         builds_by_part = defaultdict(set)
@@ -360,17 +419,88 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
             builds_by_part[req["part_id"]].add(req["build_ref"])
 
         for req in requirements:
+            compatible_items = [
+                data
+                for data in stock_items.values()
+                if data.get("part_id") in req["candidate_ids"]
+            ]
             req["physical_buffer"] = sum(
-                remaining_stock.get(pid, Decimal("0")) for pid in req["candidate_ids"]
+                dec(data.get("final_free", 0)) for data in compatible_items
             )
             req["global_shortage"] = shortage_by_part[req["part_id"]]
             req["builds"] = sorted(builds_by_part[req["part_id"]])
+            req["stock_items"] = {
+                data["stock_item_id"]: {
+                    "part_id": data["part_id"],
+                    "quantity": data["quantity"],
+                    "allocated": data["allocated"],
+                    "free": data["free"],
+                    "final_free": data["final_free"],
+                }
+                for data in compatible_items
+            }
             req["risk"] = classify_risk(
                 physical_buffer=req["physical_buffer"],
                 spillage=req["spillage"],
                 shortage=req["global_shortage"],
             )
         return requirements
+
+    def production_demand_snapshot(self):
+        """Public read-only snapshot for reuse by other plugin features.
+
+        This is intentionally a stable wrapper around the cached calculation so a
+        Packing List integration can consume the exact same Production-demand logic.
+        """
+        return self._calculate()
+
+    def assembly_risk_for_stock_item(self, build_id, stock_item_id):
+        """Return Assembly Risk context for a specific BO / StockItem pair.
+
+        The StockItem can be either already allocated to the BO or a compatible
+        item considered by the virtual Production-demand simulation.
+        """
+        try:
+            build_id = int(build_id)
+            stock_item_id = int(stock_item_id)
+        except (TypeError, ValueError):
+            return None
+
+        for req in self._calculate():
+            if req["build_id"] != build_id:
+                continue
+            existing_ids = {
+                x.get("stock_item_id") for x in req.get("existing_allocations", [])
+            }
+            virtual_ids = {
+                x.get("stock_item_id") for x in req.get("virtual_allocations", [])
+            }
+            if stock_item_id not in req.get("stock_items", {}) and stock_item_id not in existing_ids and stock_item_id not in virtual_ids:
+                continue
+
+            item = req.get("stock_items", {}).get(stock_item_id, {})
+            risk = req["risk"]
+            return {
+                "build_id": req["build_id"],
+                "build_ref": req["build_ref"],
+                "part_id": req["part_id"],
+                "part": req["part_name"],
+                "bom_remaining": req["bom_remaining"],
+                "allocated_to_build_line": req["allocated"],
+                "outstanding": req["required"],
+                "planned_spillage": req["spillage"],
+                "physical_buffer": req["physical_buffer"],
+                "global_shortage": req["global_shortage"],
+                "stock_item_id": stock_item_id,
+                "stock_item_quantity": item.get("quantity"),
+                "stock_item_allocated_total": item.get("allocated"),
+                "stock_item_free_before_simulation": item.get("free"),
+                "stock_item_final_free": item.get("final_free"),
+                "severity": risk.severity,
+                "risk": risk.label,
+                "message": risk.message,
+            }
+        return None
 
     def _calculate(self):
         """Return a short-lived cached Production Assembly Risk snapshot."""
@@ -420,7 +550,9 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
                     "part_id": req["part_id"],
                     "part": req["part_name"],
                     "description": str(req["part_full_name"]),
-                    "required_this_build": fmt(req["required"]),
+                    "required_this_build": fmt(req["bom_remaining"]),
+                    "allocated_this_build": fmt(req["allocated"]),
+                    "outstanding_this_build": fmt(req["required"]),
                     "physical_buffer": fmt(req["physical_buffer"]),
                     "planned_spillage": fmt(req["spillage"]),
                     "on_order": fmt(req["on_order"]),

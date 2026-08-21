@@ -3,15 +3,22 @@ from decimal import Decimal
 from inventree_assembly_risk.engine import classify_risk, location_is_excluded, spillage_for_part
 
 
-def test_exact_bom_is_critical():
+def test_exact_planned_quantity_is_critical():
     r = classify_risk(physical_buffer=0, spillage=5)
     assert r.severity == "critical"
-    assert r.label == "Exact BOM quantity"
+    assert r.label == "Exact planned quantity"
 
 
 def test_shortage_beats_buffer():
     r = classify_risk(physical_buffer=50, spillage=5, shortage=2)
     assert r.label == "CRITICAL - UNFILLED"
+
+
+def test_final_buffer_thresholds_do_not_double_count_spillage():
+    assert classify_risk(physical_buffer=2, spillage=100).label == "Critical low buffer"
+    assert classify_risk(physical_buffer=5, spillage=100).label == "Low buffer"
+    assert classify_risk(physical_buffer=20, spillage=100).label == "Limited buffer"
+    assert classify_risk(physical_buffer=21, spillage=100).label == "Normal spillage allowed"
 
 
 def test_passive_spillage():
@@ -29,6 +36,5 @@ def test_good_location_allowed():
 
 
 def test_unlocated_stock_allowed():
-    # A StockItem without a location is still physical stock inside InvenTree.
     assert not location_is_excluded([])
     assert not location_is_excluded([""])
