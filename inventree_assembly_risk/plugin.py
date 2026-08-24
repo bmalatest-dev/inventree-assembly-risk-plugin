@@ -27,7 +27,7 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
     SLUG = "assembly-risk"
     TITLE = "Assembly Risk"
     DESCRIPTION = "Flags components with little or no physical stock buffer across Production Build Orders."
-    VERSION = "0.5.0"
+    VERSION = "0.5.1"
     AUTHOR = "Per Vices Corporation"
     WEBSITE = "https://github.com/bmalatest-dev/inventree-assembly-risk-plugin"
 
@@ -93,30 +93,30 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
         except Exception:
             return [str(getattr(location, "name", ""))]
 
-    def _usable_stock_items(self, relevant_part_ids):
-        """Return usable physical StockItems with truly free quantities.
+    def _stock_inventory_snapshot(self, relevant_part_ids):
+        """Return usable stock plus a diagnostic record for every physical StockItem.
 
-        The free balance is the StockItem quantity minus *all* active InvenTree
-        allocations (Build, Sales Order and Transfer Order). Existing allocations
-        therefore remain reserved and can never be virtually consumed by another
-        Production Build Order.
+        The diagnostic side of this method is intentionally verbose. It records
+        the exact location path, whether the location was excluded, physical
+        quantity, active allocation total and resulting free quantity. This is
+        used by the temporary Packing List debug column to reconcile Assembly
+        Risk against InvenTree's visible stock totals.
         """
         relevant_part_ids = {int(x) for x in relevant_part_ids if x is not None}
         if not relevant_part_ids:
-            return {}
+            return {}, {}
 
         qs = (
-            StockItem.objects.filter(StockItem.IN_STOCK_FILTER, part_id__in=relevant_part_ids)
+            StockItem.objects.filter(
+                StockItem.IN_STOCK_FILTER, part_id__in=relevant_part_ids
+            )
             .select_related("location")
             .only("id", "part_id", "quantity", "location_id", "location__name")
         )
         items = list(qs.iterator(chunk_size=2000))
         if not items:
-            return {}
+            return {}, {}
 
-        # Newer InvenTree releases provide a bulk helper which resolves Build,
-        # Sales Order and Transfer Order allocations in three aggregate queries.
-        # Keep a compatibility fallback for older installations.
         try:
             allocated_by_item = StockItem.bulk_allocation_count(items)
         except Exception:
@@ -134,28 +134,46 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
                         allocated_by_item[item.pk] = Decimal("0")
 
         extra = self._extra_excluded_locations()
-        location_excluded = {}
         usable = {}
+        diagnostic = {}
+
         for item in items:
-            location_id = item.location_id
-            if location_id not in location_excluded:
-                location_excluded[location_id] = location_is_excluded(
-                    self._location_path_parts(item.location), extra
-                )
-            if location_excluded[location_id]:
-                continue
+            location_parts = self._location_path_parts(item.location)
+            excluded = location_is_excluded(location_parts, extra)
 
             quantity = max(dec(item.quantity), Decimal("0"))
             allocated = max(dec(allocated_by_item.get(item.pk, 0)), Decimal("0"))
-            free = max(quantity - allocated, Decimal("0"))
+            raw_free = max(quantity - allocated, Decimal("0"))
+            usable_free = Decimal("0") if excluded else raw_free
+
+            diagnostic[item.pk] = {
+                "stock_item_id": item.pk,
+                "part_id": item.part_id,
+                "location_path": " > ".join(location_parts),
+                "excluded_by_location": excluded,
+                "quantity": quantity,
+                "allocated": allocated,
+                "raw_free": raw_free,
+                "usable_free": usable_free,
+            }
+
+            if excluded:
+                continue
+
             usable[item.pk] = {
                 "stock_item_id": item.pk,
                 "part_id": item.part_id,
                 "quantity": quantity,
                 "allocated": allocated,
-                "free": free,
-                "final_free": free,
+                "free": raw_free,
+                "final_free": raw_free,
             }
+
+        return usable, diagnostic
+
+    def _usable_stock_items(self, relevant_part_ids):
+        """Compatibility wrapper returning only usable StockItems."""
+        usable, _ = self._stock_inventory_snapshot(relevant_part_ids)
         return usable
 
     @staticmethod
@@ -409,7 +427,9 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
         for req in requirements:
             relevant_part_ids.update(req["candidate_ids"])
 
-        stock_items = self._usable_stock_items(relevant_part_ids)
+        stock_items, stock_inventory_debug = self._stock_inventory_snapshot(
+            relevant_part_ids
+        )
         self._allocate_free_stock_items(requirements, stock_items)
 
         shortage_by_part = defaultdict(Decimal)
@@ -439,6 +459,11 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
                 }
                 for data in compatible_items
             }
+            req["stock_inventory_debug"] = [
+                dict(data)
+                for data in stock_inventory_debug.values()
+                if data.get("part_id") in req["candidate_ids"]
+            ]
             req["risk"] = classify_risk(
                 physical_buffer=req["physical_buffer"],
                 spillage=req["spillage"],
@@ -457,8 +482,14 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
     def assembly_risk_for_stock_item(self, build_id, stock_item_id):
         """Return Assembly Risk context for a specific BO / StockItem pair.
 
-        The StockItem can be either already allocated to the BO or a compatible
-        item considered by the virtual Production-demand simulation.
+        Version 0.5.1 also returns a temporary ``debug`` object containing:
+        - every relevant physical StockItem and its location-exclusion decision;
+        - active allocation totals and free quantities;
+        - each Production BO BuildLine demand / overage / allocation calculation;
+        - virtual allocation and unfilled quantities.
+
+        This diagnostic payload is read-only and is intended to make discrepancies
+        such as location filtering or double-counted demand easy to reconcile.
         """
         try:
             build_id = int(build_id)
@@ -466,20 +497,56 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
         except (TypeError, ValueError):
             return None
 
-        for req in self._calculate():
+        calculated = self._calculate()
+
+        for req in calculated:
             if req["build_id"] != build_id:
                 continue
+
             existing_ids = {
                 x.get("stock_item_id") for x in req.get("existing_allocations", [])
             }
             virtual_ids = {
                 x.get("stock_item_id") for x in req.get("virtual_allocations", [])
             }
-            if stock_item_id not in req.get("stock_items", {}) and stock_item_id not in existing_ids and stock_item_id not in virtual_ids:
+            debug_inventory_ids = {
+                x.get("stock_item_id") for x in req.get("stock_inventory_debug", [])
+            }
+
+            if (
+                stock_item_id not in req.get("stock_items", {})
+                and stock_item_id not in existing_ids
+                and stock_item_id not in virtual_ids
+                and stock_item_id not in debug_inventory_ids
+            ):
                 continue
 
             item = req.get("stock_items", {}).get(stock_item_id, {})
             risk = req["risk"]
+
+            # Collect all Production demand which competes for the same required
+            # part. This provides a direct reconciliation of the global shortage.
+            demand_debug = []
+            for other in calculated:
+                if other["part_id"] != req["part_id"]:
+                    continue
+                demand_debug.append(
+                    {
+                        "build_id": other["build_id"],
+                        "build_ref": other["build_ref"],
+                        "build_line_id": other["build_line_id"],
+                        "bom_remaining": other["bom_remaining"],
+                        "planned_spillage": other["spillage"],
+                        "spillage_rule": other["spillage_rule"],
+                        "gross_requirement": other["gross_requirement"],
+                        "existing_allocated_to_line": other["allocated"],
+                        "outstanding_before_virtual_allocation": other["required"],
+                        "existing_allocations": other.get("existing_allocations", []),
+                        "virtual_allocations": other.get("virtual_allocations", []),
+                        "unfilled": other.get("unfilled", Decimal("0")),
+                    }
+                )
+
             return {
                 "build_id": req["build_id"],
                 "build_ref": req["build_ref"],
@@ -499,7 +566,16 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
                 "severity": risk.severity,
                 "risk": risk.label,
                 "message": risk.message,
+                "debug": {
+                    "queried_build_id": build_id,
+                    "queried_stock_item_id": stock_item_id,
+                    "stock_inventory": req.get("stock_inventory_debug", []),
+                    "production_demand": demand_debug,
+                    "physical_buffer_after_all_production_demand": req["physical_buffer"],
+                    "global_shortage": req["global_shortage"],
+                },
             }
+
         return None
 
     def _calculate(self):
