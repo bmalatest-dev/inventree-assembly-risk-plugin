@@ -40,19 +40,19 @@ def test_unlocated_stock_allowed():
     assert not location_is_excluded([""])
 
 
-def test_fully_allocated_line_does_not_add_spillage_demand():
+def test_fully_allocated_line_has_no_new_overage_demand():
     unallocated, outstanding = outstanding_requirement(22, 22, 5)
     assert unallocated == Decimal("0")
     assert outstanding == Decimal("0")
 
 
-def test_partially_allocated_line_adds_spillage_to_remaining_bom_only():
+def test_partial_allocation_applies_overage_to_remaining_bom():
     unallocated, outstanding = outstanding_requirement(22, 10, 2)
     assert unallocated == Decimal("12")
     assert outstanding == Decimal("14")
 
 
-def test_unallocated_line_adds_standard_spillage():
+def test_unallocated_line_applies_standard_overage():
     unallocated, outstanding = outstanding_requirement(62, 0, 2)
     assert unallocated == Decimal("62")
     assert outstanding == Decimal("64")

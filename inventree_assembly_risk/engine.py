@@ -57,19 +57,21 @@ def is_basic_passive(category: str) -> bool:
 
 
 def outstanding_requirement(bom_remaining, allocated, spillage) -> tuple[Decimal, Decimal]:
-    """Return unallocated BOM demand and planned outstanding demand.
+    """Calculate outstanding Production demand for one BuildLine.
 
-    Planned overage is added only while real BOM demand remains unallocated.
-    A fully allocated BuildLine therefore contributes zero additional demand.
+    Overage is only required while actual BOM demand remains unallocated.
 
-    Returns:
-        (unallocated_bom_demand, outstanding_with_overage)
+    Examples:
+        BOM 22, allocated 22, overage 5 -> outstanding 0
+        BOM 22, allocated 10, overage 2 -> outstanding 14
+        BOM 62, allocated 0, overage 2  -> outstanding 64
     """
     bom_remaining = max(dec(bom_remaining), Decimal("0"))
     allocated = max(dec(allocated), Decimal("0"))
     spillage = max(dec(spillage), Decimal("0"))
 
     unallocated_bom = max(bom_remaining - allocated, Decimal("0"))
+
     if unallocated_bom <= 0:
         return Decimal("0"), Decimal("0")
 

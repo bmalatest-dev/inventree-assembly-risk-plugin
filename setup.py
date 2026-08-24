@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="inventree-assembly-risk",
-    version="0.5.2",
+    version="0.5.3",
     description="Allocation-aware assembly risk visibility for InvenTree build orders",
     author="Per Vices Corporation",
     packages=find_packages(),
