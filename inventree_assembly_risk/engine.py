@@ -56,6 +56,26 @@ def is_basic_passive(category: str) -> bool:
     return any(word in text for word in ("resistor", "capacitor", "inductor"))
 
 
+def outstanding_requirement(bom_remaining, allocated, spillage) -> tuple[Decimal, Decimal]:
+    """Return unallocated BOM demand and planned outstanding demand.
+
+    Planned overage is added only while real BOM demand remains unallocated.
+    A fully allocated BuildLine therefore contributes zero additional demand.
+
+    Returns:
+        (unallocated_bom_demand, outstanding_with_overage)
+    """
+    bom_remaining = max(dec(bom_remaining), Decimal("0"))
+    allocated = max(dec(allocated), Decimal("0"))
+    spillage = max(dec(spillage), Decimal("0"))
+
+    unallocated_bom = max(bom_remaining - allocated, Decimal("0"))
+    if unallocated_bom <= 0:
+        return Decimal("0"), Decimal("0")
+
+    return unallocated_bom, unallocated_bom + spillage
+
+
 def spillage_for_part(footprint: str, pricing_max, category: str) -> tuple[Decimal, str]:
     """Port of the spillage rules from inventree_bo_stock_consolidator."""
     fp = normalize_footprint(footprint)

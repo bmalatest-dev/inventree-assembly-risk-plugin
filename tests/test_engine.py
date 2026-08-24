@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from inventree_assembly_risk.engine import classify_risk, location_is_excluded, spillage_for_part
+from inventree_assembly_risk.engine import classify_risk, location_is_excluded, outstanding_requirement, spillage_for_part
 
 
 def test_exact_planned_quantity_is_critical():
@@ -38,3 +38,21 @@ def test_good_location_allowed():
 def test_unlocated_stock_allowed():
     assert not location_is_excluded([])
     assert not location_is_excluded([""])
+
+
+def test_fully_allocated_line_does_not_add_spillage_demand():
+    unallocated, outstanding = outstanding_requirement(22, 22, 5)
+    assert unallocated == Decimal("0")
+    assert outstanding == Decimal("0")
+
+
+def test_partially_allocated_line_adds_spillage_to_remaining_bom_only():
+    unallocated, outstanding = outstanding_requirement(22, 10, 2)
+    assert unallocated == Decimal("12")
+    assert outstanding == Decimal("14")
+
+
+def test_unallocated_line_adds_standard_spillage():
+    unallocated, outstanding = outstanding_requirement(62, 0, 2)
+    assert unallocated == Decimal("62")
+    assert outstanding == Decimal("64")

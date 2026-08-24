@@ -19,7 +19,7 @@ from build.models import Build, BuildLine
 from build.status_codes import BuildStatus
 from stock.models import StockItem
 
-from .engine import classify_risk, dec, fmt, location_is_excluded, spillage_for_part
+from .engine import classify_risk, dec, fmt, location_is_excluded, outstanding_requirement, spillage_for_part
 
 
 class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
@@ -27,7 +27,7 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
     SLUG = "assembly-risk"
     TITLE = "Assembly Risk"
     DESCRIPTION = "Flags components with little or no physical stock buffer across Production Build Orders."
-    VERSION = "0.5.1"
+    VERSION = "0.5.2"
     AUTHOR = "Per Vices Corporation"
     WEBSITE = "https://github.com/bmalatest-dev/inventree-assembly-risk-plugin"
 
@@ -214,28 +214,83 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
         return ""
 
     @staticmethod
-    def _pricing_max(part):
-        # Different InvenTree releases expose pricing through different helpers.
+    def _money_amount(value):
+        """Return the numeric amount from Decimal / Money-like values."""
+        if value in (None, ""):
+            return None
+        try:
+            amount = value.amount if hasattr(value, "amount") else value
+            return dec(amount)
+        except Exception:
+            return None
+
+    def _pricing_max(self, part):
+        """Return a conservative usable unit price and its source.
+
+        Prefer real StockItem purchase prices because these are the same values
+        exposed by the Packing List exporter. Use the maximum non-zero purchase
+        price recorded for in-stock StockItems of the exact required part.
+
+        Fall back to Part-level pricing helpers when no StockItem purchase price
+        is available.
+        """
+        stock_prices = []
+        try:
+            qs = StockItem.objects.filter(
+                StockItem.IN_STOCK_FILTER,
+                part_id=part.pk,
+                purchase_price__isnull=False,
+            ).only("id", "purchase_price")
+            for item in qs.iterator(chunk_size=1000):
+                value = self._money_amount(getattr(item, "purchase_price", None))
+                if value is not None and value > 0:
+                    stock_prices.append(value)
+        except Exception:
+            stock_prices = []
+
+        if stock_prices:
+            return max(stock_prices), "stock_item_purchase_price_max"
+
+        # Different InvenTree releases expose Part pricing through different helpers.
         for attr in ("pricing_max", "pricing_maximum", "max_price"):
             value = getattr(part, attr, None)
-            if value not in (None, ""):
-                try:
-                    return dec(value.amount if hasattr(value, "amount") else value)
-                except Exception:
-                    pass
+            amount = self._money_amount(value)
+            if amount is not None and amount > 0:
+                return amount, f"part_{attr}"
+
         try:
             price_range = part.get_price_range()
             if price_range:
-                value = (
-                    price_range[-1]
-                    if isinstance(price_range, (tuple, list))
-                    else getattr(price_range, "maximum", None)
-                )
-                if value is not None:
-                    return dec(value.amount if hasattr(value, "amount") else value)
+                candidates = []
+
+                if isinstance(price_range, (tuple, list)):
+                    candidates.extend(price_range)
+                else:
+                    for attr in (
+                        "maximum",
+                        "max",
+                        "max_price",
+                        "max_amount",
+                        "maximum_price",
+                    ):
+                        value = getattr(price_range, attr, None)
+                        if value is not None:
+                            candidates.append(value)
+
+                converted = [
+                    self._money_amount(value)
+                    for value in candidates
+                ]
+                converted = [
+                    value for value in converted
+                    if value is not None and value > 0
+                ]
+                if converted:
+                    return max(converted), "part_get_price_range"
         except Exception:
             pass
-        return Decimal("0")
+
+        return Decimal("0"), "missing_price"
 
     @staticmethod
     def _on_order_qty(part):
@@ -272,8 +327,10 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
 
         Demand is sourced from BuildLine rather than reconstructed from the BOM:
 
-            BOM remaining = BuildLine.quantity - BuildLine.consumed
-            outstanding   = BOM remaining + planned spillage - existing allocations
+            BOM remaining       = BuildLine.quantity - BuildLine.consumed
+            unallocated BOM demand = max(BOM remaining - existing allocations, 0)
+            outstanding            = unallocated BOM demand + planned spillage,
+                                     but only when unallocated BOM demand > 0
 
         BuildItem allocations are retained with their exact StockItem IDs. This
         both credits the BO which owns the allocation and lets downstream users
@@ -311,9 +368,10 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
             allow_variants = bool(getattr(bom, "allow_variants", False))
             meta_key = (part.pk, allow_variants)
             if meta_key not in component_meta:
+                pricing_max, pricing_source = self._pricing_max(part)
                 spillage, rule = spillage_for_part(
                     self._part_footprint(part),
-                    self._pricing_max(part),
+                    pricing_max,
                     self._part_category(part),
                 )
                 component_meta[meta_key] = {
@@ -324,6 +382,8 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
                     "candidate_ids": self._candidate_part_ids(part, allow_variants),
                     "spillage": spillage,
                     "spillage_rule": rule,
+                    "pricing_max": pricing_max,
+                    "pricing_source": pricing_source,
                     "on_order": self._on_order_qty(part),
                 }
             meta = component_meta[meta_key]
@@ -345,8 +405,15 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
                     }
                 )
 
-            gross_requirement = bom_remaining + meta["spillage"]
-            outstanding = max(gross_requirement - allocated, Decimal("0"))
+            unallocated_bom, outstanding = outstanding_requirement(
+                bom_remaining,
+                allocated,
+                meta["spillage"],
+            )
+            applied_spillage = (
+                meta["spillage"] if unallocated_bom > 0 else Decimal("0")
+            )
+            gross_requirement = unallocated_bom + applied_spillage
 
             requirements.append(
                 {
@@ -361,10 +428,14 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
                     "candidate_ids": set(meta["candidate_ids"]),
                     "bom_remaining": bom_remaining,
                     "allocated": allocated,
+                    "unallocated_bom": unallocated_bom,
                     "required": outstanding,
                     "gross_requirement": gross_requirement,
-                    "spillage": meta["spillage"],
+                    "spillage": applied_spillage,
+                    "standard_spillage": meta["spillage"],
                     "spillage_rule": meta["spillage_rule"],
+                    "pricing_max": meta["pricing_max"],
+                    "pricing_source": meta["pricing_source"],
                     "on_order": meta["on_order"],
                     "existing_allocations": allocation_details,
                     "virtual_allocations": [],
@@ -536,10 +607,14 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
                         "build_ref": other["build_ref"],
                         "build_line_id": other["build_line_id"],
                         "bom_remaining": other["bom_remaining"],
-                        "planned_spillage": other["spillage"],
-                        "spillage_rule": other["spillage_rule"],
-                        "gross_requirement": other["gross_requirement"],
                         "existing_allocated_to_line": other["allocated"],
+                        "unallocated_bom_demand": other.get("unallocated_bom", Decimal("0")),
+                        "standard_spillage": other.get("standard_spillage", other["spillage"]),
+                        "planned_spillage_applied": other["spillage"],
+                        "spillage_rule": other["spillage_rule"],
+                        "pricing_max": other.get("pricing_max", Decimal("0")),
+                        "pricing_source": other.get("pricing_source", ""),
+                        "gross_requirement": other["gross_requirement"],
                         "outstanding_before_virtual_allocation": other["required"],
                         "existing_allocations": other.get("existing_allocations", []),
                         "virtual_allocations": other.get("virtual_allocations", []),
@@ -556,6 +631,9 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
                 "allocated_to_build_line": req["allocated"],
                 "outstanding": req["required"],
                 "planned_spillage": req["spillage"],
+                "standard_spillage": req.get("standard_spillage", req["spillage"]),
+                "pricing_max": req.get("pricing_max", Decimal("0")),
+                "pricing_source": req.get("pricing_source", ""),
                 "physical_buffer": req["physical_buffer"],
                 "global_shortage": req["global_shortage"],
                 "stock_item_id": stock_item_id,
