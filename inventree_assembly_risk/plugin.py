@@ -27,7 +27,7 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
     SLUG = "assembly-risk"
     TITLE = "Assembly Risk"
     DESCRIPTION = "Flags components with little or no physical stock buffer across Production Build Orders."
-    VERSION = "0.5.3"
+    VERSION = "0.5.5"
     AUTHOR = "Per Vices Corporation"
     WEBSITE = "https://github.com/bmalatest-dev/inventree-assembly-risk-plugin"
 
