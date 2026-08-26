@@ -1,0 +1,6 @@
+diff --git a/setup.py b/setup.py
+--- a/setup.py
++++ b/setup.py
+@@
+-    version="0.5.4",
++    version="0.5.5",

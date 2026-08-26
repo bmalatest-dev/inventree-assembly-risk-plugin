@@ -1,0 +1,141 @@
+diff --git a/inventree_assembly_risk/plugin.py b/inventree_assembly_risk/plugin.py
+--- a/inventree_assembly_risk/plugin.py
++++ b/inventree_assembly_risk/plugin.py
+@@
+ from .engine import (
+     audit_totals,
+     classify_risk,
+     dec,
+     fmt,
+     location_is_excluded,
+     outstanding_requirement,
+     spillage_for_part,
+ )
++from .scope import include_queried_build, normalize_build_ids, scope_cache_suffix
+@@
+-    VERSION = "0.5.4"
++    VERSION = "0.5.5"
+@@
+-    def _production_requirements(self):
+-        """Build allocation-aware demand for all Production Build Orders.
++    def _production_requirements(self, included_build_ids=None):
++        """Build allocation-aware demand for the selected Production Build Orders.
++
++        ``included_build_ids=None`` retains the legacy behavior and includes all
++        Production Build Orders. An explicit iterable restricts future demand to
++        those BOs only.
++
++        Existing StockItem allocations are still removed globally by
++        ``_stock_inventory_snapshot``. This is intentional: stock already reserved
++        to an unselected BO is not free inventory for the selected planning scope.
++
+         Demand is sourced from BuildLine rather than reconstructed from the BOM:
+@@
+         production_status = self._production_status_value()
+-        lines = (
+-            BuildLine.objects.filter(build__status=production_status)
++        line_filter = {"build__status": production_status}
++        included_build_ids = normalize_build_ids(included_build_ids)
++
++        if included_build_ids is not None:
++            line_filter["build_id__in"] = included_build_ids
++
++        lines = (
++            BuildLine.objects.filter(**line_filter)
+@@
+-    def _calculate_uncached(self):
+-        """Run the allocation-aware Production Demand Snapshot."""
+-        requirements = self._production_requirements()
++    def _calculate_uncached(self, included_build_ids=None):
++        """Run the allocation-aware Production Demand Snapshot for one scope."""
++        requirements = self._production_requirements(included_build_ids)
+@@
+-    def production_demand_snapshot(self):
++    def production_demand_snapshot(self, included_build_ids=None):
+         """Public read-only snapshot for reuse by other plugin features.
+
+         This is intentionally a stable wrapper around the cached calculation so a
+         Packing List integration can consume the exact same Production-demand logic.
++
++        Args:
++            included_build_ids:
++                ``None`` for all Production BOs (legacy behavior), or an iterable
++                of Build IDs for an explicit planning scope.
+         """
+-        return self._calculate()
++        return self._calculate(included_build_ids=included_build_ids)
+
+-    def assembly_risk_for_stock_item(self, build_id, stock_item_id):
++    def assembly_risk_for_stock_item(
++        self,
++        build_id,
++        stock_item_id,
++        included_build_ids=None,
++    ):
+         """Return Assembly Risk context for a specific BO / StockItem pair.
++
++        ``included_build_ids`` is optional for backwards compatibility:
++
++        - ``None``: all Production BOs (legacy v0.5.4 behavior)
++        - explicit iterable: only those Production BOs contribute future demand
++
++        When an explicit scope is supplied, ``build_id`` is always added so the
++        queried packing-list BO can never accidentally be omitted.
+@@
+         try:
+             build_id = int(build_id)
+             stock_item_id = int(stock_item_id)
+         except (TypeError, ValueError):
+             return None
+
+-        calculated = self._calculate()
++        included_build_ids = include_queried_build(build_id, included_build_ids)
++        calculated = self._calculate(included_build_ids=included_build_ids)
+@@
+-            return {
++            scope_builds = sorted(
++                {
++                    other["build_ref"]
++                    for other in calculated
++                }
++            )
++
++            return {
+@@
+                 "severity": risk.severity,
+                 "risk": risk.label,
+                 "message": risk.message,
++                "scope": {
++                    "mode": (
++                        "all_production"
++                        if included_build_ids is None
++                        else "selected_builds"
++                    ),
++                    "included_build_ids": (
++                        None
++                        if included_build_ids is None
++                        else list(included_build_ids)
++                    ),
++                    "included_build_refs": scope_builds,
++                },
+                 "audit": audit,
+@@
+-    def _calculate(self):
+-        """Return a short-lived cached Production Assembly Risk snapshot."""
++    def _calculate(self, included_build_ids=None):
++        """Return a short-lived cached Production Assembly Risk snapshot."""
++        included_build_ids = normalize_build_ids(included_build_ids)
+         seconds = self._cache_seconds()
+         if seconds <= 0:
+-            return self._calculate_uncached()
+-        cache_key = f"inventree-assembly-risk:{self.VERSION}:production-snapshot"
++            return self._calculate_uncached(included_build_ids)
++
++        cache_key = (
++            f"inventree-assembly-risk:{self.VERSION}:production-snapshot:"
++            f"{scope_cache_suffix(included_build_ids)}"
++        )
+         result = cache.get(cache_key)
+         if result is None:
+-            result = self._calculate_uncached()
++            result = self._calculate_uncached(included_build_ids)
