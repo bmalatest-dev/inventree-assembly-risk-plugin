@@ -1,6 +1,12 @@
 from decimal import Decimal
 
-from inventree_assembly_risk.engine import classify_risk, location_is_excluded, outstanding_requirement, spillage_for_part
+from inventree_assembly_risk.engine import (
+    audit_totals,
+    classify_risk,
+    location_is_excluded,
+    outstanding_requirement,
+    spillage_for_part,
+)
 
 
 def test_exact_planned_quantity_is_critical():
@@ -56,3 +62,69 @@ def test_unallocated_line_applies_standard_overage():
     unallocated, outstanding = outstanding_requirement(62, 0, 2)
     assert unallocated == Decimal("62")
     assert outstanding == Decimal("64")
+
+
+def test_audit_totals_distinguish_gross_allocated_excluded_and_usable():
+    inventory = [
+        {
+            "quantity": Decimal("73"),
+            "allocated": Decimal("36"),
+            "raw_free": Decimal("37"),
+            "usable_free": Decimal("37"),
+            "excluded_by_location": False,
+        },
+        {
+            "quantity": Decimal("30"),
+            "allocated": Decimal("0"),
+            "raw_free": Decimal("30"),
+            "usable_free": Decimal("30"),
+            "excluded_by_location": False,
+        },
+        {
+            "quantity": Decimal("10"),
+            "allocated": Decimal("0"),
+            "raw_free": Decimal("10"),
+            "usable_free": Decimal("0"),
+            "excluded_by_location": True,
+        },
+    ]
+    demand = [
+        {"outstanding_before_virtual_allocation": Decimal("0")},
+        {"outstanding_before_virtual_allocation": Decimal("64")},
+    ]
+
+    totals = audit_totals(inventory, demand)
+
+    assert totals["gross_physical_quantity"] == Decimal("113")
+    assert totals["existing_allocations"] == Decimal("36")
+    assert totals["free_before_location_exclusions"] == Decimal("77")
+    assert totals["excluded_free_stock"] == Decimal("10")
+    assert totals["usable_free_before_demand"] == Decimal("67")
+    assert totals["outstanding_production_demand"] == Decimal("64")
+
+
+def test_audit_totals_match_adm7150_reconciliation():
+    inventory = [
+        {
+            "quantity": 73,
+            "allocated": 36,
+            "raw_free": 37,
+            "usable_free": 37,
+            "excluded_by_location": False,
+        },
+        {
+            "quantity": 30,
+            "allocated": 0,
+            "raw_free": 30,
+            "usable_free": 30,
+            "excluded_by_location": False,
+        },
+    ]
+    demand = [
+        {"outstanding_before_virtual_allocation": 0},
+        {"outstanding_before_virtual_allocation": 64},
+    ]
+
+    totals = audit_totals(inventory, demand)
+
+    assert totals["usable_free_before_demand"] - totals["outstanding_production_demand"] == Decimal("3")

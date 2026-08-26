@@ -1,0 +1,49 @@
+diff --git a/inventree_assembly_risk/plugin.py b/inventree_assembly_risk/plugin.py
+--- a/inventree_assembly_risk/plugin.py
++++ b/inventree_assembly_risk/plugin.py
+@@
+-from .engine import classify_risk, dec, fmt, location_is_excluded, outstanding_requirement, spillage_for_part
++from .engine import (
++    audit_totals,
++    classify_risk,
++    dec,
++    fmt,
++    location_is_excluded,
++    outstanding_requirement,
++    spillage_for_part,
++)
+@@
+-    VERSION = "0.5.3"
++    VERSION = "0.5.4"
+@@
+             demand_debug = []
+             for other in calculated:
+                 if other["part_id"] != req["part_id"]:
+                     continue
+@@
+                         "unfilled": other.get("unfilled", Decimal("0")),
+                     }
+                 )
++
++            audit = audit_totals(
++                req.get("stock_inventory_debug", []),
++                demand_debug,
++            )
++            audit.update(
++                {
++                    "physical_buffer_after_all_production_demand": req["physical_buffer"],
++                    "global_shortage": req["global_shortage"],
++                }
++            )
++
+             return {
+                 "build_id": req["build_id"],
+                 "build_ref": req["build_ref"],
+@@
+                 "severity": risk.severity,
+                 "risk": risk.label,
+                 "message": risk.message,
++                "audit": audit,
+                 "debug": {
+                     "queried_build_id": build_id,
+                     "queried_stock_item_id": stock_item_id,
