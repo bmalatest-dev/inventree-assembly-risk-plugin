@@ -37,7 +37,7 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
         "Flags components with little or no physical stock buffer across "
         "Production Build Orders."
     )
-    VERSION = "0.5.5"
+    VERSION = "0.5.6"
     AUTHOR = "Per Vices Corporation"
     WEBSITE = "https://github.com/bmalatest-dev/inventree-assembly-risk-plugin"
 
