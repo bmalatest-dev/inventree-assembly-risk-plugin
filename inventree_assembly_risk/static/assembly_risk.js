@@ -9,11 +9,11 @@ function resolveFeatureContext(props) {
   // UI plugin renderers. Accept either shape to keep this plugin tolerant of
   // minor frontend-version differences.
   if (!props) return {};
-  if (props.context && props.context.rows !== undefined) return props.context;
+  if (props.context) return props.context;
   if (props.featureContext) return props.featureContext;
   if (props.feature && props.feature.context) return props.feature.context;
   if (props.item && props.item.context) return props.item.context;
-  return props.context || props;
+  return props;
 }
 
 function getReact() {
@@ -136,8 +136,64 @@ function renderTable(props, mode) {
   );
 }
 
+function AsyncBuildPanel(props) {
+  const React = getReact();
+  const h = React.createElement;
+  const initial = resolveFeatureContext(props);
+  const [data, setData] = React.useState(null);
+  const [loadError, setLoadError] = React.useState('');
+
+  React.useEffect(() => {
+    let active = true;
+    const url = initial.data_url;
+
+    if (!url) {
+      setLoadError('Assembly Risk data URL was not provided.');
+      return () => { active = false; };
+    }
+
+    fetch(url, {
+      method: 'GET',
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' },
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return response.json();
+      })
+      .then((payload) => {
+        if (active) setData(payload);
+      })
+      .catch((error) => {
+        if (active) {
+          setLoadError(`Assembly Risk calculation failed to load: ${error}`);
+        }
+      });
+
+    return () => { active = false; };
+  }, [initial.data_url]);
+
+  if (loadError) {
+    return renderError(h, loadError);
+  }
+
+  if (!data) {
+    return h(
+      'div',
+      { style: { padding: '12px', opacity: 0.75 } },
+      'Calculating Assembly Risk…'
+    );
+  }
+
+  return renderTable({ context: data }, 'build');
+}
+
 export function renderPanel(props) {
-  return renderTable(props, 'build');
+  const React = getReact();
+  if (!React?.createElement) return null;
+  return React.createElement(AsyncBuildPanel, props);
 }
 
 export function renderDashboardItem(props) {

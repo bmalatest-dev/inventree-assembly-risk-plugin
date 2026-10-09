@@ -10,9 +10,11 @@ from collections import defaultdict
 from decimal import Decimal
 
 from django.core.cache import cache
+from django.http import JsonResponse
+from django.urls import path
 from django.utils.translation import gettext_lazy as _
 from plugin import InvenTreePlugin
-from plugin.mixins import SettingsMixin, UserInterfaceMixin
+from plugin.mixins import SettingsMixin, UrlsMixin, UserInterfaceMixin
 
 from build.models import Build, BuildLine
 from build.status_codes import BuildStatus
@@ -29,7 +31,7 @@ from .engine import (
 from .scope import include_queried_build, normalize_build_ids, scope_cache_suffix
 
 
-class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
+class AssemblyRiskPlugin(SettingsMixin, UrlsMixin, UserInterfaceMixin, InvenTreePlugin):
     NAME = "AssemblyRisk"
     SLUG = "assembly-risk"
     TITLE = "Assembly Risk"
@@ -37,7 +39,7 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
         "Flags components with little or no physical stock buffer across "
         "Production Build Orders."
     )
-    VERSION = "0.5.6"
+    VERSION = "0.5.7"
     AUTHOR = "Per Vices Corporation"
     WEBSITE = "https://github.com/bmalatest-dev/inventree-assembly-risk-plugin"
 
@@ -1220,13 +1222,72 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
 
         return text
 
+    def get_urls(self):
+        """Plugin API endpoints.
+
+        Keep expensive Assembly Risk calculations out of ``get_ui_panels``.
+        InvenTree requests all plugin panel definitions together, so doing the
+        calculation there can delay every Build Order plugin panel.
+        """
+        return [
+            path(
+                "build/<int:build_id>/",
+                self.build_risk_api,
+                name="assembly-risk-build",
+            ),
+        ]
+
+    def _build_panel_payload(self, build_id):
+        """Calculate the Assembly Risk payload for one Build Order."""
+        notice = ""
+
+        try:
+            build = Build.objects.only(
+                "id",
+                "status",
+            ).get(
+                pk=build_id
+            )
+
+            if not self._is_production_build(build):
+                rows = []
+                error = ""
+                notice = (
+                    "This Build Order is not in Production "
+                    "and is excluded from the Assembly Risk "
+                    "calculation."
+                )
+            else:
+                rows = self._rows_for_build(build_id)
+                error = ""
+
+        except Exception as exc:
+            rows = []
+            error = (
+                "Assembly Risk calculation error: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        return {
+            "mode": "build",
+            "rows": rows,
+            "build_id": build_id,
+            "error": error,
+            "notice": notice,
+            "plugin_version": self.VERSION,
+        }
+
+    def build_risk_api(self, request, build_id, **kwargs):
+        """Return Assembly Risk data after the panel itself has loaded."""
+        return JsonResponse(self._build_panel_payload(int(build_id)))
+
     def get_ui_panels(
         self,
         request,
         context,
         **kwargs,
     ):
-        """Add Assembly Risk to individual Build Order pages."""
+        """Register Assembly Risk on Build Order pages without calculating it."""
         context = context or {}
 
         target_model = self._normalized_target_model(
@@ -1245,10 +1306,7 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
             "buildorder"
         )
 
-        if (
-            not is_build
-            or target_id in (None, "")
-        ):
+        if not is_build or target_id in (None, ""):
             return []
 
         try:
@@ -1256,39 +1314,8 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
         except (TypeError, ValueError):
             return []
 
-        notice = ""
-
-        try:
-            build = Build.objects.only(
-                "id",
-                "status",
-            ).get(
-                pk=build_id
-            )
-
-            if not self._is_production_build(
-                build
-            ):
-                rows = []
-                error = ""
-                notice = (
-                    "This Build Order is not in Production "
-                    "and is excluded from the Assembly Risk "
-                    "calculation."
-                )
-            else:
-                rows = self._rows_for_build(
-                    build_id
-                )
-                error = ""
-
-        except Exception as exc:
-            rows = []
-            error = (
-                "Assembly Risk calculation error: "
-                f"{type(exc).__name__}: {exc}"
-            )
-
+        # IMPORTANT: Do not query Build, stock, BOMs, allocations, or risk data
+        # here. InvenTree aggregates all plugin panels in one request.
         return [
             {
                 "key": "assembly-risk-panel",
@@ -1303,10 +1330,10 @@ class AssemblyRiskPlugin(SettingsMixin, UserInterfaceMixin, InvenTreePlugin):
                 ),
                 "context": {
                     "mode": "build",
-                    "rows": rows,
                     "build_id": build_id,
-                    "error": error,
-                    "notice": notice,
+                    "data_url": (
+                        f"/plugin/{self.SLUG}/build/{build_id}/"
+                    ),
                     "plugin_version": self.VERSION,
                 },
             }
