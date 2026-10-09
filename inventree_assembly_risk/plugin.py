@@ -39,7 +39,7 @@ class AssemblyRiskPlugin(SettingsMixin, UrlsMixin, UserInterfaceMixin, InvenTree
         "Flags components with little or no physical stock buffer across "
         "Production Build Orders."
     )
-    VERSION = "0.5.7"
+    VERSION = "0.5.8"
     AUTHOR = "Per Vices Corporation"
     WEBSITE = "https://github.com/bmalatest-dev/inventree-assembly-risk-plugin"
 
@@ -1222,7 +1222,7 @@ class AssemblyRiskPlugin(SettingsMixin, UrlsMixin, UserInterfaceMixin, InvenTree
 
         return text
 
-    def get_urls(self):
+    def setup_urls(self):
         """Plugin API endpoints.
 
         Keep expensive Assembly Risk calculations out of ``get_ui_panels``.
